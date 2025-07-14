@@ -539,31 +539,60 @@ pub struct Market {
     pub market_bump: u8
 }
 
-#[macro_use]
-macro_rules! assert_non_zero {
-    ($array:expr) => {
-        if $array.contains(&0u64) {
-            return err!(MarketError::ZeroBalance)
-        }
-    };
-}
+// #[macro_use]
+// macro_rules! assert_non_zero {
+//     ($array:expr) => {
+//         if $array.contains(&0u64) {
+//             return err!(MarketError::ZeroBalance)
+//         }
+//     };
+// }
 
-#[macro_use]
-macro_rules! assert_not_locked {
-    ($lock:expr) => {
-        if $lock == true {
-            return err!(MarketError::PoolLocked)
-        }
-    };
-}
+// #[macro_use]
+// macro_rules! assert_not_locked {
+//     ($lock:expr) => {
+//         if $lock == true {
+//             return err!(MarketError::PoolLocked)
+//         }
+//     };
+// }
 
+// #[macro_use]
+// macro_rules! assert_not_expired {
+//     ($expiration:expr) => {
+//         if Clock::get()?.unix_timestamp > $expiration {
+//             return err!(MarketError::OfferExpired);
+//         }
+//     };
+// }
 #[macro_use]
-macro_rules! assert_not_expired {
-    ($expiration:expr) => {
-        if Clock::get()?.unix_timestamp > $expiration {
-            return err!(MarketError::OfferExpired);
-        }
-    };
+mod macros {
+    #[macro_export]
+    macro_rules! assert_not_locked {
+        ($lock:expr) => {
+            if $lock {
+                return err!(MarketError::PoolLocked);
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! assert_not_expired {
+        ($expiration:expr) => {
+            if Clock::get()?.unix_timestamp > $expiration {
+                return err!(MarketError::OfferExpired);
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! assert_non_zero {
+        ($array:expr) => {
+            if $array.contains(&0u64) {
+                return err!(MarketError::ZeroBalance);
+            }
+        };
+    }
 }
 
 pub fn mint_token(ctx: Context<'_, '_, '_, '_, Deposit<'_>>, amount: u64, is_yes: bool) -> Result<()> {
