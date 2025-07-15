@@ -47,25 +47,25 @@ pub mod prediction_market {
             },
         ))?;
         create_idempotent(CpiContext::new(
-            self.associated_token_program.to_account_info(),
+            ctx.accounts.associated_token_program.to_account_info(),
             anchor_spl::associated_token::Create {
-                payer: self.signer.to_account_info(),
-                associated_token: self.vault_yes.to_account_info(),
-                authority: self.market.to_account_info(),
-                mint: self.mint_yes.to_account_info(),
-                system_program: self.system_program.to_account_info(),
-                token_program: self.token_program.to_account_info(),
+                payer: ctx.accounts.signer.to_account_info(),
+                associated_token: ctx.accounts.vault_yes.to_account_info(),
+                authority: ctx.accounts.market.to_account_info(),
+                mint: ctx.accounts.mint_yes.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
             },
         ))?;
         create_idempotent(CpiContext::new(
-            self.associated_token_program.to_account_info(),
+            ctx.accounts.associated_token_program.to_account_info(),
             anchor_spl::associated_token::Create {
-                payer: self.signer.to_account_info(),
-                associated_token: self.vault_no.to_account_info(),
-                authority: self.market.to_account_info(),
-                mint: self.mint_no.to_account_info(),
-                system_program: self.system_program.to_account_info(),
-                token_program: self.token_program.to_account_info(),
+                payer: ctx.accounts.signer.to_account_info(),
+                associated_token: ctx.accounts.vault_no.to_account_info(),
+                authority: ctx.accounts.market.to_account_info(),
+                mint: ctx.accounts.mint_no.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
             },
         ))?;
 
@@ -89,9 +89,10 @@ pub mod prediction_market {
             uses: None
         };
 
+        let binding = ctx.accounts.market.seed.to_le_bytes();
         let seeds = &[
             b"market",
-            ctx.accounts.market.seed.to_le_bytes().as_ref(),
+            binding.as_ref(),
             &[ctx.accounts.market.market_bump]
         ];
         let signer_seeds = &[&seeds[..]];
@@ -136,24 +137,114 @@ pub mod prediction_market {
         assert_not_expired!(expiration);
         assert_non_zero!([max_yes, max_no]);
 
-        mint_token(ctx, max_yes, true)?;
-        mint_token(ctx, max_no, true)?;
+        mint_token(&ctx, max_yes, true)?;
+        mint_token(&ctx, max_no, false)?;
 
-        ctx.accounts.market.total_liquidity.checked_add(max_yes.checked_add(max_no).unwrap()).unwrap();
+        ctx.accounts.market.total_liquidity = ctx.accounts.market.total_liquidity
+            .checked_add(max_yes.checked_add(max_no).unwrap()).unwrap();
+        
         Ok(())
     }
-    pub fn swap(ctx: Context<Swap>, is_usdc_to_token: bool, amount: u64, is_yes: bool, min_out: u64, expiration: i64) -> Result<()> {
+    pub fn swap(
+        ctx: Context<Swap>, 
+        is_usdc_to_token: bool, 
+        amount_in: u64, 
+        is_yes: bool, 
+        min_out: u64, 
+        expiration: i64
+    ) -> Result<()> {
         assert_not_locked!(ctx.accounts.market.locked);
         assert_not_expired!(expiration);
         assert_non_zero!([amount_in, min_out]);
 
-        let amount_out = calculate_lmsr_output(amount_in, ctx.accounts.vault_yes.amount, ctx.accounts.vault_no.amount, is_buying, is_yes)?;
+        let amount_out = calculate_lmsr_output(
+            amount_in, 
+            ctx.accounts.vault_yes.amount, 
+            ctx.accounts.vault_no.amount, 
+            is_usdc_to_token, 
+            is_yes
+        )?;
 
         require!(amount_out >= min_out, MarketError::SlippageExceeded);
 
-        if is_buying {
-            ctx.accounts.de
+        if is_usdc_to_token {
+            // Transfer USDC from user to vault
+            let cpi_accounts = TransferChecked {
+                from: ctx.accounts.user_ata_usdc.to_account_info(),
+                mint: ctx.accounts.mint_usdc.to_account_info(),
+                to: ctx.accounts.vault_usdc.to_account_info(),
+                authority: ctx.accounts.user.to_account_info(),
+            };
+            let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
+            transfer_checked(cpi_ctx, amount_in, ctx.accounts.mint_usdc.decimals)?;
+
+            // Mint tokens to user
+            let (user_ata, mint) = if is_yes {
+                (ctx.accounts.user_ata_yes.to_account_info(), ctx.accounts.mint_yes.to_account_info())
+            } else {
+                (ctx.accounts.user_ata_no.to_account_info(), ctx.accounts.mint_no.to_account_info())
+            };
+
+            let cpi_accounts = MintTo {
+                mint,
+                to: user_ata,
+                authority: ctx.accounts.market.to_account_info(),
+            };
+
+            let binding = ctx.accounts.market.seed.to_le_bytes();
+            let seeds = &[
+                b"market",
+                binding.as_ref(),
+                &[ctx.accounts.market.market_bump],
+            ];
+            let signer_seeds = &[&seeds[..]];
+
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                cpi_accounts,
+                signer_seeds,
+            );
+            mint_to(cpi_ctx, amount_out)?;
+        } else {
+            // Burn user tokens
+            let (user_ata, mint) = if is_yes {
+                (ctx.accounts.user_ata_yes.to_account_info(), ctx.accounts.mint_yes.to_account_info())
+            } else {
+                (ctx.accounts.user_ata_no.to_account_info(), ctx.accounts.mint_no.to_account_info())
+            };
+
+            let cpi_accounts = Burn {
+                mint,
+                from: user_ata,
+                authority: ctx.accounts.user.to_account_info(),
+            };
+            let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
+            burn(cpi_ctx, amount_in)?;
+
+            // Transfer USDC to user
+            let cpi_accounts = TransferChecked {
+                from: ctx.accounts.vault_usdc.to_account_info(),
+                mint: ctx.accounts.mint_usdc.to_account_info(),
+                to: ctx.accounts.user_ata_usdc.to_account_info(),
+                authority: ctx.accounts.market.to_account_info(),
+            };
+
+            let binding = ctx.accounts.market.seed.to_le_bytes();
+            let seeds = &[
+                b"market",
+                binding.as_ref(),
+                &[ctx.accounts.market.market_bump],
+            ];
+            let signer_seeds = &[&seeds[..]];
+
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                cpi_accounts,
+                signer_seeds,
+            );
+            transfer_checked(cpi_ctx, amount_out, ctx.accounts.mint_usdc.decimals)?;
         }
+
         Ok(())
     }
     pub fn settle(ctx: Context<SettleMarket>, is_resolved: bool) -> Result<()> {
@@ -162,17 +253,13 @@ pub mod prediction_market {
         require!(!ctx.accounts.market.settled, MarketError::MarketAlreadySettled);
         require!(Clock::get()?.unix_timestamp > ctx.accounts.market.end_time, MarketError::MarketNotEnded);
 
-        if is_resolved {
-            ctx.accounts.market.settled = true;
-        } else {
-            ctx.accounts.market.settled = false;
-        }
+        ctx.accounts.market.settled = is_resolved;
         Ok(())
     }
     pub fn claim(ctx: Context<ClaimReward>, is_yes: bool) -> Result<()> {
         assert_not_locked!(ctx.accounts.market.locked);
 
-        require!(!ctx.accounts.market.settled, MarketError::MarketNotSettled);
+        require!(ctx.accounts.market.settled, MarketError::MarketNotSettled);
 
         let (user_tokens, total_tokens) = if is_yes {
             (ctx.accounts.user_ata_yes.amount, ctx.accounts.mint_yes.supply)
@@ -197,20 +284,21 @@ pub mod prediction_market {
             authority: ctx.accounts.market.to_account_info(),
         };
 
+        let binding = ctx.accounts.market.seed.to_le_bytes();
         let seeds = &[
             b"market",
-            ctx.accounts.market.seed.to_le_bytes().as_ref(),
+            binding.as_ref(),
             &[ctx.accounts.market.market_bump],
         ];
         let signer_seeds = &[&seeds[..]];
 
-        let ctx = CpiContext::new_with_signer(
+        let ctx_transfer = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             accounts,
             signer_seeds,
         );
 
-        transfer_checked(ctx, user_payout, ctx.accounts.mint_usdc.decimals)?;
+        transfer_checked(ctx_transfer, user_payout, ctx.accounts.mint_usdc.decimals)?;
 
         let (mint, from) = match is_yes {
             true => (
@@ -229,17 +317,17 @@ pub mod prediction_market {
             authority: ctx.accounts.user.to_account_info(),
         };
 
-        let ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
+        let ctx_burn = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
 
-        burn(ctx, user_tokens)?;
+        burn(ctx_burn, user_tokens)?;
 
         Ok(())
     }
-    pub fn lock(ctx: Context<Update>, is_yes: bool) -> Result<()> {
+    pub fn lock(ctx: Context<Update>) -> Result<()> {
         ctx.accounts.market.locked = true;
         Ok(())
     }
-    pub fn unlock(ctx: Context<Update>, is_yes: bool) -> Result<()> {
+    pub fn unlock(ctx: Context<Update>) -> Result<()> {
         ctx.accounts.market.locked = false;
         Ok(())
     }
@@ -361,61 +449,61 @@ pub struct Deposit<'info> {
 #[derive(Accounts)]
 pub struct Swap<'info> {
     #[account(mut)]
-    user: Signer<'info>,
+    pub user: Signer<'info>,
     #[account(
         mut,
         mint::token_program = token_program,
         mint::authority = market
     )]
-    mint_yes: Box<InterfaceAccount<'info, Mint>>,
+    pub mint_yes: Box<InterfaceAccount<'info, Mint>>,
     #[account(
         mut,
         mint::token_program = token_program,
         mint::authority = market
     )]
-    mint_no: Box<InterfaceAccount<'info, Mint>>,
+    pub mint_no: Box<InterfaceAccount<'info, Mint>>,
     #[account(
         mint::token_program = token_program,
     )]
-    mint_usdc: Box<InterfaceAccount<'info, Mint>>,
+    pub mint_usdc: Box<InterfaceAccount<'info, Mint>>,
     #[account(
         mut,
         associated_token::mint = mint_yes,
         associated_token::authority = market,
     )]
-    vault_yes: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub vault_yes: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         mut,
         associated_token::mint = mint_no,
         associated_token::authority = market,
     )]
-    vault_no: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub vault_no: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         mut,
         associated_token::mint = mint_usdc,
         associated_token::authority = market
     )]
-    vault_usdc: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub vault_usdc: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         init_if_needed,
         payer = user,
         associated_token::mint = mint_yes,
         associated_token::authority = user,
     )]
-    user_ata_yes: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub user_ata_yes: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         init_if_needed,
         payer = user,
         associated_token::mint = mint_no,
         associated_token::authority = user,
     )]
-    user_ata_no: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub user_ata_no: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         mut,
         associated_token::mint = mint_usdc,
         associated_token::authority = user,
     )]
-    user_ata_usdc: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub user_ata_usdc: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         mut,
         has_one = mint_yes,
@@ -433,7 +521,7 @@ pub struct Swap<'info> {
 #[derive(Accounts)]
 pub struct SettleMarket<'info> {
     #[account(mut)]
-    admin: Signer<'info>,
+    pub admin: Signer<'info>,
     #[account(
         mut,
         seeds = [b"market", market.seed.to_le_bytes().as_ref()],
@@ -539,32 +627,6 @@ pub struct Market {
     pub market_bump: u8
 }
 
-// #[macro_use]
-// macro_rules! assert_non_zero {
-//     ($array:expr) => {
-//         if $array.contains(&0u64) {
-//             return err!(MarketError::ZeroBalance)
-//         }
-//     };
-// }
-
-// #[macro_use]
-// macro_rules! assert_not_locked {
-//     ($lock:expr) => {
-//         if $lock == true {
-//             return err!(MarketError::PoolLocked)
-//         }
-//     };
-// }
-
-// #[macro_use]
-// macro_rules! assert_not_expired {
-//     ($expiration:expr) => {
-//         if Clock::get()?.unix_timestamp > $expiration {
-//             return err!(MarketError::OfferExpired);
-//         }
-//     };
-// }
 #[macro_use]
 mod macros {
     #[macro_export]
@@ -595,7 +657,7 @@ mod macros {
     }
 }
 
-pub fn mint_token(ctx: Context<'_, '_, '_, '_, Deposit<'_>>, amount: u64, is_yes: bool) -> Result<()> {
+pub fn mint_token(ctx: &Context<'_, '_, '_, '_, Deposit<'_>>, amount: u64, is_yes: bool) -> Result<()> {
     let (to, mint) = match is_yes {
         true => (
             ctx.accounts.vault_yes.to_account_info(),
@@ -620,13 +682,13 @@ pub fn mint_token(ctx: Context<'_, '_, '_, '_, Deposit<'_>>, amount: u64, is_yes
     ];
     let signer_seeds = &[&seeds[..]];
 
-    let ctx = CpiContext::new_with_signer(
+    let cpi_ctx = CpiContext::new_with_signer(
         ctx.accounts.token_program.to_account_info(),
         cpi_account,
         signer_seeds,
     );
 
-    mint_to(ctx, amount)
+    mint_to(cpi_ctx, amount)
 }
 
 #[derive(Debug)]
