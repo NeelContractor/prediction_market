@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-prediction_market = "FqzkXZdwYjurnUKetJCAvaUw5WAqbwzU6gZEwydeEfqS"
+prediction_market = "7AbkVe2udNXLaceG5BHGcVS1DSXJkTdE61bmz3rau3sd"
 
 [registry]
 url = "https://api.apr.dev"

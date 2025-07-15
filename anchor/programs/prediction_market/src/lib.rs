@@ -16,7 +16,7 @@ use anchor_spl::{
 pub const PRECISION: u32 = 6;
 pub const DEFAULT_B: u64 = 1_000_000_000;
 
-declare_id!("FqzkXZdwYjurnUKetJCAvaUw5WAqbwzU6gZEwydeEfqS");
+declare_id!("7AbkVe2udNXLaceG5BHGcVS1DSXJkTdE61bmz3rau3sd");
 
 #[program]
 pub mod prediction_market {
