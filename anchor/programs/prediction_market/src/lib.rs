@@ -15,6 +15,7 @@ use anchor_spl::{
 
 pub const PRECISION: u32 = 6;
 pub const DEFAULT_B: u64 = 1_000_000_000;
+pub const MAX_FEE_BPS: u16 = 1000; // 10%
 
 declare_id!("7AbkVe2udNXLaceG5BHGcVS1DSXJkTdE61bmz3rau3sd");
 
@@ -22,17 +23,19 @@ declare_id!("7AbkVe2udNXLaceG5BHGcVS1DSXJkTdE61bmz3rau3sd");
 pub mod prediction_market {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, seed: u64, name: String, token_yes_name: String, token_yes_symbol: String, token_no_name: String, token_no_symbol: String, token_yes_uri: String, token_no_uri: String, fee: u16, end_time: i64) -> Result<()> {
+    pub fn initialize(ctx: Context<Initialize>, seed: u64, name: String, token_yes_name: String, token_yes_symbol: String, token_no_name: String, token_no_symbol: String, token_yes_uri: String, token_no_uri: String, fee_bps: u16, end_time: i64) -> Result<()> {
         ctx.accounts.market.set_inner(Market { 
             market_name: name, 
             seed: seed, 
             mint_yes: ctx.accounts.mint_yes.key(), 
             mint_no: ctx.accounts.mint_no.key(), 
             total_liquidity: 0, 
-            fee, 
+            fee_bps, 
             locked: false, 
             end_time, 
             settled: false, 
+            resolution: false,
+            admin: ctx.accounts.signer.key(),
             market_bump: ctx.bumps.market 
         });
         create_idempotent(CpiContext::new(
@@ -162,7 +165,8 @@ pub mod prediction_market {
             ctx.accounts.vault_yes.amount, 
             ctx.accounts.vault_no.amount, 
             is_usdc_to_token, 
-            is_yes
+            is_yes,
+            ctx.accounts.market.fee_bps
         )?;
 
         require!(amount_out >= min_out, MarketError::SlippageExceeded);
@@ -247,19 +251,29 @@ pub mod prediction_market {
 
         Ok(())
     }
-    pub fn settle(ctx: Context<SettleMarket>, is_resolved: bool) -> Result<()> {
+    pub fn settle(ctx: Context<SettleMarket>, resolution: bool) -> Result<()> {
         assert_not_locked!(ctx.accounts.market.locked);
+        assert_authorized!(ctx.accounts.market.admin, ctx.accounts.admin.key());
 
         require!(!ctx.accounts.market.settled, MarketError::MarketAlreadySettled);
         require!(Clock::get()?.unix_timestamp > ctx.accounts.market.end_time, MarketError::MarketNotEnded);
 
-        ctx.accounts.market.settled = is_resolved;
+        ctx.accounts.market.settled = true;
+        ctx.accounts.market.resolution = resolution;
         Ok(())
     }
     pub fn claim(ctx: Context<ClaimReward>, is_yes: bool) -> Result<()> {
         assert_not_locked!(ctx.accounts.market.locked);
 
         require!(ctx.accounts.market.settled, MarketError::MarketNotSettled);
+
+        let user_holds_winning_tokens = if ctx.accounts.market.resolution {
+            is_yes && ctx.accounts.user_ata_yes.amount > 0
+        } else {
+            !is_yes && ctx.accounts.user_ata_no.amount > 0
+        };
+
+        require!(user_holds_winning_tokens, MarketError::NoWinningTokens);
 
         let (user_tokens, total_tokens) = if is_yes {
             (ctx.accounts.user_ata_yes.amount, ctx.accounts.mint_yes.supply)
@@ -268,14 +282,17 @@ pub mod prediction_market {
         };
 
         require!(user_tokens > 0, MarketError::InsufficientBalance);
+        require!(total_tokens > 0, MarketError::NoTokenSupply);
 
         let total_payout = ctx.accounts.vault_usdc.amount;
 
         let user_payout = (user_tokens as u128)
             .checked_mul(total_payout as u128)
-            .unwrap()
+            .ok_or(MarketError::MathOverflow)?
             .checked_div(total_tokens as u128)
-            .unwrap() as u64;
+            .ok_or(MarketError::MathOverflow)? as u64;
+
+        require!(user_payout > 0, MarketError::NoRewardToClaim);
 
         let accounts = TransferChecked {
             from: ctx.accounts.vault_usdc.to_account_info(),
@@ -318,16 +335,17 @@ pub mod prediction_market {
         };
 
         let ctx_burn = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
-
         burn(ctx_burn, user_tokens)?;
 
         Ok(())
     }
     pub fn lock(ctx: Context<Update>) -> Result<()> {
+        assert_authorized!(ctx.accounts.market.admin, ctx.accounts.signer.key());
         ctx.accounts.market.locked = true;
         Ok(())
     }
     pub fn unlock(ctx: Context<Update>) -> Result<()> {
+        assert_authorized!(ctx.accounts.market.admin, ctx.accounts.signer.key());
         ctx.accounts.market.locked = false;
         Ok(())
     }
@@ -360,19 +378,19 @@ pub struct Initialize<'info> {
     )]
     pub mint_no: Box<InterfaceAccount<'info, Mint>>,
     pub mint_usdc: Box<InterfaceAccount<'info, Mint>>,
-    /// CHECK: This account is not read or written in this instruction
+    /// CHECK: This account is created by the associated token program
     #[account(mut)]
     pub vault_yes: UncheckedAccount<'info>,
-    /// CHECK: This account is not read or written in this instruction
+    /// CHECK: This account is created by the associated token program
     #[account(mut)]
     pub vault_no: UncheckedAccount<'info>,
-    /// CHECK: This account is not read or written in this instruction
+    /// CHECK: This account is created by the associated token program
     #[account(mut)]
     pub vault_usdc: UncheckedAccount<'info>,
-    ///CHECK: New Metaplex Account being created
+    /// CHECK: Metaplex metadata account
     #[account(mut)]
     pub metadata_yes: UncheckedAccount<'info>,
-    ///CHECK: New Metaplex Account being created
+    /// CHECK: Metaplex metadata account
     #[account(mut)]
     pub metadata_no: UncheckedAccount<'info>,
     #[account(
@@ -620,10 +638,12 @@ pub struct Market {
     pub mint_yes: Pubkey,
     pub mint_no: Pubkey,
     pub total_liquidity: u64,
-    pub fee: u16,
+    pub fee_bps: u16,
     pub locked: bool,
     pub end_time: i64,
     pub settled: bool,
+    pub resolution: bool, // true if yes wins, flaseif no wins
+    pub admin: Pubkey, // admin who can settle the market
     pub market_bump: u8
 }
 
@@ -652,6 +672,15 @@ mod macros {
         ($array:expr) => {
             if $array.contains(&0u64) {
                 return err!(MarketError::ZeroBalance);
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! assert_authorized {
+        ($expected:expr, $actual:expr) => {
+            if $expected != $actual {
+                return err!(MarketError::Unauthorized);
             }
         };
     }
@@ -783,21 +812,85 @@ pub fn calculate_lmsr_output(
     input_amount: u64,
     yes_shares: u64,
     no_shares: u64,
-    is_buying: bool,
+    is_usdc_to_token: bool,
     is_yes: bool,
+    fee_bps: u16,
 ) -> Result<u64> {
     let calculator = LMSRCalculator::new(DEFAULT_B, yes_shares, no_shares);
     
     // Apply fees (1%)
-    let fees = Decimal::from(input_amount) * dec!(0.01);
-    let input_after_fees = Decimal::from(input_amount) - fees;
+    let fee_rate = Decimal::from(fee_bps) / Decimal::from(10000u16);
+    let input_decimal = Decimal::from(input_amount);
 
-    if is_buying {
-        let price = calculator.calculate_price(is_yes)?;
-        Ok((input_after_fees / price).round_dp(0).to_u64().ok_or(MarketError::MathOverflow)?)
+    if is_usdc_to_token {
+        let input_after_fee = input_decimal * (Decimal::ONE - fee_rate);
+        let current_cost = calculator.calculate_cost()?;
+        let mut low = 0u64;
+        let mut high = input_amount * 2;
+        let mut best_shares = 0u64;
+
+        while low <= high {
+            let mid = (low + high) / 2;
+            let new_yes_shares = if is_yes {
+                calculator.yes_shares + Decimal::from(mid)
+            } else {
+                calculator.yes_shares
+            };
+
+            let new_no_shares = if is_yes {
+                calculator.no_shares 
+            } else {
+                calculator.no_shares + Decimal::from(mid)
+            };
+
+            let new_calculator = LMSRCalculator {
+                b: calculator.b,
+                yes_shares: new_yes_shares,
+                no_shares: new_no_shares
+            };
+
+            let new_cost = new_calculator.calculate_cost()?;
+            let cost_difference = new_cost - current_cost;
+            if cost_difference <= input_after_fee {
+                best_shares = mid;
+                low = mid + 1;
+            } else {
+                high = mid.saturating_sub(1);
+            }
+        }
+        Ok(best_shares)
     } else {
-        calculator.calculate_cost_to_buy(input_after_fees.to_u64().unwrap(), is_yes)
+        let current_cost = calculator.calculate_cost()?;
+        let new_yes_shares = if is_yes {
+            calculator.yes_shares - input_decimal
+        } else {
+            calculator.yes_shares
+        };
+
+        let new_no_shares = if is_yes {
+            calculator.no_shares
+        } else {
+            calculator.no_shares - input_decimal
+        };
+
+        if new_yes_shares < Decimal::ZERO || new_no_shares < Decimal::ZERO {
+            return Err(MarketError::InsufficientBalance.into());
+        }
+
+        let new_calculator = LMSRCalculator {
+            b: calculator.b,
+            yes_shares: new_yes_shares,
+            no_shares: new_no_shares
+        };
+
+        let new_cost = new_calculator.calculate_cost()?;
+        let usdc_output = current_cost - new_cost;
+
+        let usdc_after_fees = usdc_output * (Decimal::ONE - fee_rate);
+
+        Ok(usdc_after_fees.round_dp(PRECISION).to_u64().ok_or(MarketError::MathOverflow)?)
     }
+    
 }
 
 #[error_code]
@@ -856,4 +949,10 @@ pub enum MarketError {
     InvalidPrice,
     #[msg("Invalid cost")]
     InvalidCost,
+    #[msg("No Token Supply")]
+    NoTokenSupply,
+    #[msg("No Reward To Claim")]
+    NoRewardToClaim,
+    #[msg("No Winning Tokens")]
+    NoWinningTokens,
 }
