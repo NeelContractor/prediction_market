@@ -7,6 +7,7 @@ import {
   createAccount, 
   createAssociatedTokenAccount, 
   createMint, 
+  getAccount, 
   getAssociatedTokenAddress, 
   mintTo,
   TOKEN_PROGRAM_ID 
@@ -24,515 +25,142 @@ describe('prediction_market', () => {
   anchor.setProvider(provider)
   
   const program = anchor.workspace.PredictionMarket as Program<PredictionMarket>
-  // const payer = Keypair.generate();
+  const creator = provider.wallet as anchor.Wallet;
 
-  let admin: Keypair;
-  let user: Keypair;
-  let marketSeed: anchor.BN;
-  let market: PublicKey;
-  let marketBump: number;
-  let mintUsdc: PublicKey;
-  let mintYes: PublicKey;
-  let mintNo: PublicKey;
-  let vaultUsdc: PublicKey;
-  let vaultYes: PublicKey;
-  let vaultNo: PublicKey;
-  let metadataYes: PublicKey;
-  let metadataNo: PublicKey;
-  let userAtaUsdc: PublicKey;
-  let userAtaYes: PublicKey;
-  let userAtaNo: PublicKey;
+  const market = Keypair.generate();
+  const collateralMint = Keypair.generate();
+  const yesTokenMint = Keypair.generate();
+  const noTokenMint = Keypair.generate();
+  let marketAuthority: PublicKey;
+  let collateralVault: Keypair;
+  let creatorCollateralAccount: PublicKey;
 
-  // Metaplex Token Metadata Program ID
-  // const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
-
-  const USDC_DECIMALS = 6;
-  const INITIAL_USDC_AMOUNT = new anchor.BN(1000 * 10 ** USDC_DECIMALS); // 1000 USDC
-  const MARKET_NAME = "Will BTC reach $100k by EOY?";
-  const YES_TOKEN_NAME = "BTC 100K Yes";
-  const YES_TOKEN_SYMBOL = "BTC100Y";
-  const NO_TOKEN_NAME = "BTC 100K No";
-  const NO_TOKEN_SYMBOL = "BTC100N";
-  const TOKEN_URI = "https://example.com/metadata.json";
-  const FEE_BPS = 100; // 1%
-  const END_TIME = new anchor.BN(Math.floor(Date.now() / 1000) + 86400 * 30); // 30 days from now
+  const user = Keypair.generate();
+  let userCollateralAccount: PublicKey;
+  let userYesTokenAccount: PublicKey;
+  let userNoTokenAccount: PublicKey;
 
   beforeAll(async() => {
+    await provider.connection.requestAirdrop(user.publicKey, 2 * LAMPORTS_PER_SOL);
 
-    admin = Keypair.generate();
-    user = Keypair.generate();
-    
-    // Airdrop SOL to accounts
-    await provider.connection.confirmTransaction(
-      await provider.connection.requestAirdrop(admin.publicKey, 2 * LAMPORTS_PER_SOL)
-    );
-    await provider.connection.confirmTransaction(
-      await provider.connection.requestAirdrop(user.publicKey, 2 * LAMPORTS_PER_SOL)
-    );
-
-    // Create USDC mint (simulate USDC)
-    mintUsdc = await createMint(
-      provider.connection,
-      admin,
-      admin.publicKey,
-      null,
-      USDC_DECIMALS,
-      undefined,
-      undefined,
-      TOKEN_PROGRAM_ID
-    );
-
-    // Generate market seed and derive PDAs
-    marketSeed = new anchor.BN(Math.floor(Math.random() * 1000000));
-
-    [market, marketBump] = PublicKey.findProgramAddressSync(
-      [Buffer.from("market"), marketSeed.toArrayLike(Buffer, "le", 8)],
+    [marketAuthority] = await PublicKey.findProgramAddressSync(
+      [Buffer.from("authority"), market.publicKey.toBuffer()],
       program.programId
     );
 
-    [mintYes] = PublicKey.findProgramAddressSync(
-      [Buffer.from("yes_mint"), marketSeed.toArrayLike(Buffer, "le", 8)],
-      program.programId
-    );
+    await createMint(provider.connection, creator.payer, creator.publicKey, null, 6, collateralMint);
 
-    [mintNo] = PublicKey.findProgramAddressSync(
-      [Buffer.from("no_mint"), marketSeed.toArrayLike(Buffer, "le", 8)],
-      program.programId
-    );
+    creatorCollateralAccount = await createAccount(provider.connection, creator.payer, collateralMint.publicKey, creator.publicKey);
+    await mintTo(provider.connection, creator.payer, collateralMint.publicKey, creatorCollateralAccount, creator.publicKey, 2000 * 1_000_000); // Mint 2000 collateral
 
-    // Get vault addresses
-    vaultUsdc = await getAssociatedTokenAddress(mintUsdc, market, true);
-    vaultYes = await getAssociatedTokenAddress(mintYes, market, true);
-    vaultNo = await getAssociatedTokenAddress(mintNo, market, true);
+    userCollateralAccount = await createAccount(provider.connection, user, collateralMint.publicKey, user.publicKey);
+    await mintTo(provider.connection, creator.payer, collateralMint.publicKey, userCollateralAccount, creator.publicKey, 500 * 1_000_000); // Mint 500 collateral for user
 
-    // Get metadata addresses
-    [metadataYes] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("metadata"),
-        METADATA_PROGRAM_ID.toBuffer(),
-        mintYes.toBuffer(),
-      ],
-      METADATA_PROGRAM_ID
-    );
+    userYesTokenAccount = await createAccount(provider.connection, user, yesTokenMint.publicKey, user.publicKey, undefined, undefined, TOKEN_PROGRAM_ID);
+    userNoTokenAccount = await createAccount(provider.connection, user, noTokenMint.publicKey, user.publicKey, undefined, undefined, TOKEN_PROGRAM_ID);
 
-    [metadataNo] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("metadata"),
-        METADATA_PROGRAM_ID.toBuffer(),
-        mintNo.toBuffer(),
-      ],
-      METADATA_PROGRAM_ID
-    );
-
-    // Create user USDC account and mint tokens
-    userAtaUsdc = await createAssociatedTokenAccount(
-      provider.connection,
-      admin,
-      mintUsdc,
-      user.publicKey
-    );
-
-    await mintTo(
-      provider.connection,
-      admin,
-      mintUsdc,
-      userAtaUsdc,
-      admin.publicKey,
-      INITIAL_USDC_AMOUNT.toNumber()
-    );
-
-    // Get user token accounts (will be created later)
-    userAtaYes = await getAssociatedTokenAddress(mintYes, user.publicKey);
-    userAtaNo = await getAssociatedTokenAddress(mintNo, user.publicKey);
+    collateralVault = Keypair.generate();
   })
 
-  it('Initializes the prediction market', async () => {
+  it('Create a new Market', async () => {
+    const question = "Will SOL price be > $200 by EOY 2025?"
+    const endTimestamp = new anchor.BN(Math.floor(Date.now() / 1000) - 3600);
+    const initialLiquidtity = new anchor.BN(100 * 1_000_000);
+    const marketType = { manual: {} };
+    const resolutionSource = creator.publicKey; // creator is the resolver
+
     const tx = await program.methods
-      .initialize(
-        marketSeed,
-        MARKET_NAME,
-        YES_TOKEN_NAME,
-        YES_TOKEN_SYMBOL,
-        NO_TOKEN_NAME,
-        NO_TOKEN_SYMBOL,
-        TOKEN_URI,
-        TOKEN_URI,
-        FEE_BPS,
-        END_TIME
-      )
+      .createMarket(question, endTimestamp, marketType, resolutionSource, initialLiquidtity)
       .accountsPartial({
-        signer: admin.publicKey,
-        mintYes,
-        mintNo,
-        mintUsdc,
-        vaultYes,
-        vaultNo,
-        vaultUsdc,
-        metadataYes,
-        metadataNo,
-        market,
+        creator: creator.publicKey,
+        market: market.publicKey,
+        collateralMint: collateralMint.publicKey,
+        yesTokenMint: yesTokenMint.publicKey,
+        noTokenMint: noTokenMint.publicKey,
+        marketAuthority: marketAuthority,
+        collateralVault: collateralVault.publicKey,
+        creatorCollateralAccount: creatorCollateralAccount,
         systemProgram: SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
-        tokenMetadataProgram: METADATA_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        rent: SYSVAR_RENT_PUBKEY,
+        rent: SYSVAR_RENT_PUBKEY
       })
-      .signers([admin])
+      .signers([market, yesTokenMint, noTokenMint, collateralVault])
       .rpc();
 
-    console.log("Initialize transaction signature:", tx);
-
-    // Verify market was created
-    const marketAccount = await program.account.market.fetch(market);
-    expect(marketAccount.marketName).toEqual(MARKET_NAME);
-    expect(marketAccount.seed.toString()).toEqual(marketSeed.toString());
-    expect(marketAccount.feeBps).toEqual(FEE_BPS);
-    expect(marketAccount.locked).toBeFalsy;
-    expect(marketAccount.settled).toBeFalsy;
-    expect(marketAccount.admin.toString()).toEqual(admin.publicKey.toString());
+      console.log("create Market tx: ", tx);
+      const marketAcc = await program.account.market.fetch(market.publicKey);
+      expect(marketAcc.creator.toString()).toEqual(creator.publicKey.toString());
+      expect(marketAcc.question).toEqual(question);
+      expect(marketAcc.yesSharesOutstanding.toNumber()).toEqual(initialLiquidtity.toNumber());
+      expect(marketAcc.noSharesOutstanding.toNumber()).toEqual(initialLiquidtity.toNumber());
   })
 
-  it("Adds initial liquidity to the market", async () => {
-    const yesAmount = new anchor.BN(100 * 10 ** USDC_DECIMALS); // 100 tokens
-    const noAmount = new anchor.BN(100 * 10 ** USDC_DECIMALS); // 100 tokens
-    const expiration = new anchor.BN(Math.floor(Date.now() / 1000) + 300); // 5 minutes
+  it("Nuy yes shares", async () => {
+    const sharesDesired = new anchor.BN(50 * 1_000_000);
+    const maxCost = new anchor.BN(100 * 1_000_000);
+    const outcome = { yes: {} };
+
+    // const marketBefore = await program.account.market.fetch(market.publicKey);
 
     const tx = await program.methods
-      .addLiquidity(yesAmount, noAmount, expiration)
-      .accountsPartial({
-        user: admin.publicKey,
-        mintYes,
-        mintNo,
-        mintUsdc,
-        vaultYes,
-        vaultNo,
-        vaultUsdc,
-        market,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
+      .buyShares(outcome, maxCost, sharesDesired)
+      .accountsStrict({
+        market: market.publicKey,
+        user: user.publicKey,
+        userCollateralAccount,
+        userYesTokenAccount,
+        userNoTokenAccount,
+        collateralVault: collateralVault.publicKey,
+        yesTokenMint: yesTokenMint.publicKey,
+        noTokenMint: noTokenMint.publicKey,
+        marketAuthority,
+        tokenProgram: TOKEN_PROGRAM_ID
       })
-      .signers([admin])
+      .signers([user])
+      .rpc();
+      console.log("Buy yes shares tx: ", tx);
+
+      // const marketAfter = await program.account.market.fetch(market.publicKey);
+      // const expectedYesShares = marketBefore.yesSharesOutstanding.add(sharesDesired);
+      // expect(marketAfter.yesSharesOutstanding.toNumber()).toEqual(expectedYesShares.toNumber());
+  })
+
+  it("Resolves the market to yes", async () => {
+    const winningOutcome = { yes: {} };
+
+    const tx = await program.methods
+      .resolveMarket(winningOutcome)
+      .accountsStrict({
+        market: market.publicKey,
+        resolutionSource: creator.publicKey,
+        resolver: creator.publicKey
+      })
+      .signers([creator.payer])
       .rpc();
 
-    console.log("Add liquidity transaction signature:", tx);
+      console.log("Resolve the market tx: ", tx);
+  })
 
-    // Verify liquidity was added
-    const marketAccount = await program.account.market.fetch(market);
-    const expectedLiquidity = yesAmount.add(noAmount);
-    expect(marketAccount.totalLiquidity.toString()).toEqual(expectedLiquidity.toString());
-  });
-
-  it("Swap USDC for YES tokens", async () => {
-    const swapAmount = new anchor.BN(10 * 10 ** USDC_DECIMALS); // 10 USDC
-    const minOut = new anchor.BN(1); // Minimum 1 token output
-    const expiration = new anchor.BN(Math.floor(Date.now() / 1000) + 300); // 5 minutes
+  it("Redeems winnings for collateral", async () => {
+    const winningTokenBefore = await getAccount(provider.connection, userYesTokenAccount);
+    const amountToRedeem = winningTokenBefore.amount;
 
     const tx = await program.methods
-      .swap(
-        true, // is_usdc_to_token
-        swapAmount,
-        true, // is_yes
-        minOut,
-        expiration
-      )
-      .accountsPartial({
+      .redeemWinnings(new anchor.BN(amountToRedeem))
+      .accountsStrict({
+        market: market.publicKey,
         user: user.publicKey,
-        mintYes,
-        mintNo,
-        mintUsdc,
-        vaultYes,
-        vaultNo,
-        vaultUsdc,
-        userAtaYes,
-        userAtaNo,
-        userAtaUsdc,
-        market,
+        userCollateralAccount: userCollateralAccount,
+        userWinningTokenAccount: userYesTokenAccount,
+        collateralVault: collateralVault.publicKey,
+        winningTokenMint: yesTokenMint.publicKey,
+        marketAuthority,
         tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
       })
       .signers([user])
       .rpc();
 
-      console.log("Swap USDC -> YES transaction:", tx);
+      console.log("Redeem winning tx: ", tx);
+  })
 
-      // Check user received YES tokens
-      const userYesBalance = await provider.connection.getTokenAccountBalance(userAtaYes);
-      expect(parseInt(userYesBalance.value.amount)).toBeGreaterThan(0);
-      console.log("User YES token balance:", userYesBalance.value.uiAmount);
-  });
-
-  it("Swap USDC for NO tokens", async () => {
-    const swapAmount = new anchor.BN(10 * 10 ** USDC_DECIMALS); // 10 USDC
-    const minOut = new anchor.BN(1); // Minimum 1 token output
-    const expiration = new anchor.BN(Math.floor(Date.now() / 1000) + 300); // 5 minutes
-
-    const tx = await program.methods
-      .swap(
-        true, // is_usdc_to_token
-        swapAmount,
-        false, // is_yes (false = NO tokens)
-        minOut,
-        expiration
-      )
-      .accountsPartial({
-        user: user.publicKey,
-        mintYes,
-        mintNo,
-        mintUsdc,
-        vaultYes,
-        vaultNo,
-        vaultUsdc,
-        userAtaYes,
-        userAtaNo,
-        userAtaUsdc,
-        market,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([user])
-      .rpc();
-
-      console.log("Swap USDC -> NO transaction:", tx);
-
-      // Check user received NO tokens
-      const userNoBalance = await provider.connection.getTokenAccountBalance(userAtaNo);
-      expect(parseInt(userNoBalance.value.amount)).toBeGreaterThan(0);
-      console.log("User NO token balance:", userNoBalance.value.uiAmount);
-  
-  });
-
-  it("Swap YES tokens back to USDC", async () => {
-    const userYesBalance = await provider.connection.getTokenAccountBalance(userAtaYes);
-    const swapAmount = new anchor.BN(Math.floor(parseInt(userYesBalance.value.amount) / 2)); // Swap half
-    const minOut = new anchor.BN(1); // Minimum 1 USDC output
-    const expiration = new anchor.BN(Math.floor(Date.now() / 1000) + 300); // 5 minutes
-
-    const usdcBalanceBefore = await provider.connection.getTokenAccountBalance(userAtaUsdc);
-
-    const tx = await program.methods
-      .swap(
-        false, // is_usdc_to_token (false = token to USDC)
-        swapAmount,
-        true, // is_yes
-        minOut,
-        expiration
-      )
-      .accountsPartial({
-        user: user.publicKey,
-        mintYes,
-        mintNo,
-        mintUsdc,
-        vaultYes,
-        vaultNo,
-        vaultUsdc,
-        userAtaYes,
-        userAtaNo,
-        userAtaUsdc,
-        market,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([user])
-      .rpc();
-
-      console.log("Swap YES -> USDC transaction:", tx);
-
-      // Check user received USDC
-      const usdcBalanceAfter = await provider.connection.getTokenAccountBalance(userAtaUsdc);
-      expect(parseInt(usdcBalanceAfter.value.amount)).toBeGreaterThan(
-        parseInt(usdcBalanceBefore.value.amount)
-      );
-      console.log("USDC received:", 
-        parseInt(usdcBalanceAfter.value.amount) - parseInt(usdcBalanceBefore.value.amount)
-      );
-  });
-
-  it("Lock market", async () => {
-    const tx = await program.methods
-      .lock()
-      .accountsPartial({
-        signer: admin.publicKey,
-        market: market,
-      })
-      .signers([admin])
-      .rpc();
-
-      console.log("Lock market transaction:", tx);
-
-      // Verify market is locked
-      const marketAccount = await program.account.market.fetch(market);
-      expect(marketAccount.locked).toBeTruthy;
-  });
-
-  it("Unlock market", async () => {
-    const tx = await program.methods
-      .unlock()
-      .accountsPartial({
-        signer: admin.publicKey,
-        market: market,
-      })
-      .signers([admin])
-      .rpc();
-
-      console.log("Unlock market transaction:", tx);
-
-      // Verify market is unlocked
-      const marketAccount = await program.account.market.fetch(market);
-      expect(marketAccount.locked).toBeFalsy;
-  
-  });
-
-  it("Settles the market (YES wins)", async () => {
-      const tx = await program.methods
-        .settle(true) // Market resolves to YES
-        .accountsPartial({
-          admin: admin.publicKey,
-          market: market,
-        })
-        .signers([admin])
-        .rpc();
-      
-      // Should not reach here
-      console.log("Settle market transaction:", tx);
-
-    // Verify market is settled
-      const marketAccount = await program.account.market.fetch(market);
-      expect(marketAccount.settled).toBeTruthy;
-      expect(marketAccount.resolution).toBeTruthy; // YES wins
-  });
-
-  it("Claims rewards for YES token holders", async () => {
-      const usdcBalanceBefore = await provider.connection.getTokenAccountBalance(userAtaUsdc);
-      const yesBalanceBefore = await provider.connection.getTokenAccountBalance(userAtaYes);
-  
-      const tx = await program.methods
-      .claim(true) // Claim YES tokens
-      .accountsPartial({
-        user: user.publicKey,
-        mintYes,
-        mintNo,
-        mintUsdc,
-        vaultYes,
-        vaultNo,
-        vaultUsdc,
-        userAtaYes,
-        userAtaNo,
-        userAtaUsdc,
-        market,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([user])
-      .rpc();
-
-    console.log("Claim rewards transaction:", tx);
-
-    // Verify user received USDC payout
-    const usdcBalanceAfter = await provider.connection.getTokenAccountBalance(userAtaUsdc);
-    expect(parseInt(usdcBalanceAfter.value.amount)).toBeGreaterThan(
-      parseInt(usdcBalanceBefore.value.amount)
-    );
-
-    // Verify YES tokens were burned
-    const yesBalanceAfter = await provider.connection.getTokenAccountBalance(userAtaYes);
-    expect(parseInt(yesBalanceAfter.value.amount)).toBeLessThan(
-      parseInt(yesBalanceBefore.value.amount)
-    );
-
-    console.log("USDC payout:", 
-      parseInt(usdcBalanceAfter.value.amount) - parseInt(usdcBalanceBefore.value.amount)
-    );
-  });
-
-  it("Fails to claim rewards for NO token holders (they lost)", async () => {
-    try {
-      await program.methods
-        .claim(false) // Try to claim NO tokens
-        .accountsPartial({
-          user: user.publicKey,
-          mintYes,
-          mintNo,
-          mintUsdc,
-          vaultYes,
-          vaultNo,
-          vaultUsdc,
-          userAtaYes,
-          userAtaNo,
-          userAtaUsdc,
-          market,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([user])
-        .rpc();
-
-      // Should not reach here
-      expect("Expected transaction to fail");
-    } catch (error: any) {
-      console.log("Expected error for NO token claim:", error);
-      expect(error.error.errorCode.message).toContain("NoWinningTokens");
-    }
-  });
-
-  it("Fails to initialize with invalid fee", async () => {
-    const invalidSeed = new anchor.BN(999999);
-    const [invalidMarket] = PublicKey.findProgramAddressSync(
-      [Buffer.from("market"), invalidSeed.toArrayLike(Buffer, "le", 8)],
-      program.programId
-    );
-
-    try {
-      await program.methods
-        .initialize(
-          invalidSeed,
-          "Invalid Market",
-          "Invalid Yes",
-          "IY",
-          "Invalid No", 
-          "IN",
-          TOKEN_URI,
-          TOKEN_URI,
-          1500, // 15% fee (invalid, max is 10%)
-          END_TIME
-        )
-        .accountsPartial({
-          signer: admin.publicKey,
-          mintYes: mintYes, // This would need to be different for new market
-          mintNo: mintNo,   // This would need to be different for new market
-          mintUsdc,
-          vaultYes,
-          vaultNo,
-          vaultUsdc,
-          metadataYes,
-          metadataNo,
-          market: invalidMarket,
-          systemProgram: SystemProgram.programId,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          tokenMetadataProgram: METADATA_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          rent: SYSVAR_RENT_PUBKEY,
-        })
-        .signers([admin])
-        .rpc();
-
-      expect("Expected transaction to fail with high fee");
-    } catch (error: any) {
-      console.log("Expected error for high fee:", error.error.errorCode.message);
-    }
-  });
-
-  it("Fails to swap with insufficient slippage tolerance", async () => {
-    // Create a new market for this test to avoid settled market issues
-    const newSeed = new anchor.BN(Math.floor(Math.random() * 1000000));
-    // ... (you'd need to initialize a new market here)
-    
-    // For now, we'll skip this test since our market is already settled
-    console.log("Skipping slippage test - would need new market");
-  });
 })
