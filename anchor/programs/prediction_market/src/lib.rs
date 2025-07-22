@@ -33,7 +33,7 @@ pub mod prediction_market {
         market.collateral_mint = ctx.accounts.collateral_mint.key();
         market.yes_token_mint = ctx.accounts.yes_token_mint.key();
         market.no_token_mint = ctx.accounts.no_token_mint.key();
-        market.collateral_vault = ctx.accounts.market_authority.key();
+        market.collateral_vault = ctx.accounts.collateral_vault.key();
         market.market_authority = ctx.accounts.market_authority.key();
         market.bump = ctx.bumps.market_authority;
 
@@ -383,7 +383,7 @@ pub struct CreateMarket<'info> {
         init,
         payer = creator,
         token::mint = collateral_mint,
-        token::authority = market_authority
+        token::authority = market_authority,
     )]
     pub collateral_vault: Account<'info, TokenAccount>,
     #[account(

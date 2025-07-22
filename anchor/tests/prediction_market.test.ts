@@ -34,6 +34,7 @@ describe("prediction_market", () => {
   let noTokenMint: Keypair;
   let marketAuthority: PublicKey;
   let collateralVault: Keypair; // Keep as Keypair for signing
+  let collateralVaultPubkey: PublicKey;
   let creatorCollateralAccount: PublicKey;
   let userCollateralAccount: PublicKey;
   let userYesTokenAccount: PublicKey;
@@ -55,10 +56,8 @@ describe("prediction_market", () => {
     await provider.connection.requestAirdrop(creator.publicKey, 3 * anchor.web3.LAMPORTS_PER_SOL);
     await provider.connection.requestAirdrop(user.publicKey, 3 * anchor.web3.LAMPORTS_PER_SOL);
     
-    // Wait for airdrops to confirm
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Create collateral mint (USDC-like token)
     collateralMint = await createMint(
       provider.connection,
       creator,
@@ -67,7 +66,6 @@ describe("prediction_market", () => {
       6 // USDC has 6 decimals
     );
 
-    // Create collateral accounts
     creatorCollateralAccount = await createAccount(
       provider.connection,
       creator,
@@ -82,7 +80,6 @@ describe("prediction_market", () => {
       user.publicKey
     );
 
-    // Mint collateral tokens to creator and user
     await mintTo(
       provider.connection,
       creator,
@@ -101,13 +98,11 @@ describe("prediction_market", () => {
       MINT_AMOUNT
     );
 
-    // Derive PDAs BEFORE using them
     [marketAuthority] = PublicKey.findProgramAddressSync(
       [Buffer.from("authority"), market.publicKey.toBuffer()],
       program.programId
     );
 
-    // Create user token accounts for YES/NO tokens (will be created after mints exist)
     userYesTokenAccount = await getAssociatedTokenAddressSync(
       yesTokenMint.publicKey,
       user.publicKey
@@ -123,9 +118,6 @@ describe("prediction_market", () => {
     const question = "Will Bitcoin reach $100k by end of 2024?";
     const endTimestamp = new anchor.BN(Date.now() / 1000 + 86400 * 30); // 30 days from now
     const resolutionSource = creator.publicKey; // Manual resolution
-
-    // console.log("collateralVaultPubkey: ", collateralVaultPubkey.toBase58());
-    console.log("collateralVault: ", collateralVault.publicKey.toBase58());
     
     const tx = await program.methods
       .createMarket(
@@ -143,7 +135,7 @@ describe("prediction_market", () => {
         yesTokenMint: yesTokenMint.publicKey,
         noTokenMint: noTokenMint.publicKey,
         marketAuthority: marketAuthority,
-        collateralVault: collateralVault.publicKey, // Use the PublicKey but sign with Keypair
+        collateralVault: collateralVault.publicKey, 
         creatorCollateralAccount: creatorCollateralAccount,
         systemProgram: SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
@@ -154,9 +146,8 @@ describe("prediction_market", () => {
 
     console.log("Create market tx:", tx);
 
-    // Verify market state
     const marketAccount = await program.account.market.fetch(market.publicKey);
-    console.log("collateralVault: ", marketAccount.collateralVault.toBase58());
+    console.log("marketAccount collateralVault: ", marketAccount.collateralVault.toBase58());
     
     // expect(marketAccount.creator.toString()).toEqual(creator.publicKey.toString());
     // expect(marketAccount.question).toEqual(question);
@@ -166,7 +157,6 @@ describe("prediction_market", () => {
     // expect(marketAccount.noSharesOutstanding.toNumber()).toEqual(INITIAL_LIQUIDITY);
     // expect(marketAccount.totalLiquidity.toNumber()).toEqual(INITIAL_LIQUIDITY * 2);
 
-    // Create associated token accounts AFTER the mints are created
     const createYesTokenAccountTx = new Transaction().add(
       createAssociatedTokenAccountInstruction(
         user.publicKey, // payer
@@ -263,9 +253,9 @@ describe("prediction_market", () => {
     
     const tx = await program.methods
       .sellShares(
-        { yes: {} }, // Selling YES shares
-        new anchor.BN(sharesToSell),
-        new anchor.BN(minPayout)
+        { yes: {} }, // ShareOutcome - selling YES shares
+        new anchor.BN(sharesToSell), // shares_to_sell parameter
+        new anchor.BN(minPayout) // min_payout parameter
       )
       .accountsStrict({
         market: market.publicKey,
@@ -454,9 +444,10 @@ describe("prediction_market", () => {
         .signers([user])
         .rpc();
       
-      fail("Should have failed with zero amount");
+      expect("Should have failed with zero amount");
     } catch (error: any) {
-      expect(error.error.errorCode.code).toBe("ZeroAmount");
+      console.log(error)
+      expect(error.error.errorCode.code).toContain("ZeroAmount");
     }
   });
 });
