@@ -1,5 +1,5 @@
-import { DashboardFeature } from '@/components/dashboard/dashboard-feature'
+import PredictionMarketDashboard from '@/components/prediction_market/PredictionMarketDashboard'
 
 export default function Home() {
-  return <DashboardFeature />
+  return <PredictionMarketDashboard />
 }

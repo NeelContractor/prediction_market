@@ -84,6 +84,10 @@ pub mod prediction_market {
 
         match outcome {
             ShareOutcome::Yes => {
+                let user_yes_account = ctx.accounts.user_yes_token_account
+                .as_ref()
+                .ok_or(MarketError::InvalidTokenAccount)?;
+
                 market.yes_shares_outstanding = market.yes_shares_outstanding
                     .checked_add(shares_desired)
                     .ok_or(MarketError::MathOverflow)?;
@@ -91,13 +95,17 @@ pub mod prediction_market {
                 let cpi_program = ctx.accounts.token_program.to_account_info();
                 let cpi_accounts = MintTo {
                     mint: ctx.accounts.yes_token_mint.to_account_info(),
-                    to: ctx.accounts.user_yes_token_account.to_account_info(),
+                    to: user_yes_account.to_account_info(),
                     authority: ctx.accounts.market_authority.to_account_info()
                 };
                 let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
                 mint_to(cpi_ctx, shares_desired)?;
             },
             ShareOutcome::No => {
+                let user_no_account = ctx.accounts.user_no_token_account
+                .as_ref()
+                .ok_or(MarketError::InvalidTokenAccount)?;
+
                 market.no_shares_outstanding = market.no_shares_outstanding
                     .checked_add(shares_desired)
                     .ok_or(MarketError::MathOverflow)?;
@@ -105,7 +113,7 @@ pub mod prediction_market {
                 let cpi_program = ctx.accounts.token_program.to_account_info();
                 let cpi_accounts = MintTo {
                     mint: ctx.accounts.no_token_mint.to_account_info(),
-                    to: ctx.accounts.user_no_token_account.to_account_info(),
+                    to: user_no_account.to_account_info(),
                     authority: ctx.accounts.market_authority.to_account_info()
                 };
                 let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
@@ -134,8 +142,18 @@ pub mod prediction_market {
                 ShareOutcome::No => ctx.accounts.no_token_mint.to_account_info(),
             },
             from: match outcome {
-                ShareOutcome::Yes => ctx.accounts.user_yes_token_account.to_account_info(),
-                ShareOutcome::No => ctx.accounts.user_no_token_account.to_account_info(),
+                ShareOutcome::Yes => {
+                    let user_yes_account = ctx.accounts.user_yes_token_account
+                        .as_ref()
+                        .ok_or(MarketError::InvalidTokenAccount)?;
+                    user_yes_account.to_account_info()
+                },
+                ShareOutcome::No => {
+                    let user_no_account = ctx.accounts.user_no_token_account
+                        .as_ref()
+                        .ok_or(MarketError::InvalidTokenAccount)?;
+                    user_no_account.to_account_info()
+                },
             },
             authority: ctx.accounts.user.to_account_info(),
         };
@@ -411,12 +429,12 @@ pub struct BuyShares<'info> {
         mut,
         token::mint = market.yes_token_mint
     )]
-    pub user_yes_token_account: Account<'info, TokenAccount>,
+    pub user_yes_token_account: Option<Account<'info, TokenAccount>>,
     #[account(
         mut,
         token::mint = market.no_token_mint
     )]
-    pub user_no_token_account: Account<'info, TokenAccount>,
+    pub user_no_token_account: Option<Account<'info, TokenAccount>>,
     #[account(
         mut,
         address = market.collateral_vault
@@ -447,17 +465,35 @@ pub struct SellShares<'info> {
     pub market: Account<'info, Market>,
     #[account(mut)]
     pub user: Signer<'info>,
-    #[account(mut, token::mint = market.collateral_mint)]
+    #[account(
+        mut, 
+        token::mint = market.collateral_mint
+    )]
     pub user_collateral_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub user_yes_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub user_no_token_account: Account<'info, TokenAccount>,
-    #[account(mut, address = market.collateral_vault)]
+    #[account(
+        mut,
+        token::mint = market.yes_token_mint
+    )]
+    pub user_yes_token_account: Option<Account<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::mint = market.no_token_mint
+    )]
+    pub user_no_token_account: Option<Account<'info, TokenAccount>>,
+    #[account(
+        mut, 
+        address = market.collateral_vault
+    )]
     pub collateral_vault: Account<'info, TokenAccount>,
-    #[account(mut, address = market.yes_token_mint)]
+    #[account(
+        mut, 
+        address = market.yes_token_mint
+    )]
     pub yes_token_mint: Account<'info, Mint>,
-    #[account(mut, address = market.no_token_mint)]
+    #[account(
+        mut, 
+        address = market.no_token_mint
+    )]
     pub no_token_mint: Account<'info, Mint>,
     ///CHECK: PDA authority
     #[account(
@@ -483,11 +519,17 @@ pub struct RedeemWinnings<'info> {
     #[account(mut)]
     pub market: Account<'info, Market>,
     pub user: Signer<'info>,
-    #[account(mut, token::mint = market.collateral_mint)]
+    #[account(
+        mut, 
+        token::mint = market.collateral_mint
+    )]
     pub user_collateral_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub user_winning_token_account: Account<'info, TokenAccount>,
-    #[account(mut, address = market.collateral_vault)]
+    #[account(
+        mut, 
+        address = market.collateral_vault
+    )]
     pub collateral_vault: Account<'info, TokenAccount>,
     #[account(mut)]
     pub winning_token_mint: Account<'info, Mint>,
@@ -592,5 +634,7 @@ pub enum MarketError {
     #[msg("Outcome reqired for manual resolution.")]
     OutcomeRequired,   
     #[msg("Outcome threshold reqired for oracle markets.")]
-    OracleThresholdRequired,   
+    OracleThresholdRequired,  
+    #[msg("Invalid Token Account.")]
+    InvalidTokenAccount,  
 }
