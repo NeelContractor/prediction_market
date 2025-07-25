@@ -1,0 +1,1 @@
+/Users/neelcontractor/Documents/prediction_market/anchor/target/sbpf-solana-solana/release/libprediction_market.rlib: /Users/neelcontractor/Documents/prediction_market/anchor/programs/prediction_market/src/lib.rs

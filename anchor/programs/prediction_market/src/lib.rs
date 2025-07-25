@@ -132,52 +132,48 @@ pub mod prediction_market {
         let market = &mut ctx.accounts.market;
         require!(!market.resolved, MarketError::MarketResolved);
         require!(shares_to_sell > 0, MarketError::ZeroAmount);
-
+    
         let payout = calculate_sell_payout(market, &outcome, shares_to_sell)?;
         require!(payout >= min_payout, MarketError::SlippageExceeded);
-
-        let burn_accounts = Burn {
-            mint: match outcome {
-                ShareOutcome::Yes => ctx.accounts.yes_token_mint.to_account_info(),
-                ShareOutcome::No => ctx.accounts.no_token_mint.to_account_info(),
-            },
-            from: match outcome {
-                ShareOutcome::Yes => {
-                    let user_yes_account = ctx.accounts.user_yes_token_account
-                        .as_ref()
-                        .ok_or(MarketError::InvalidTokenAccount)?;
-                    user_yes_account.to_account_info()
-                },
-                ShareOutcome::No => {
-                    let user_no_account = ctx.accounts.user_no_token_account
-                        .as_ref()
-                        .ok_or(MarketError::InvalidTokenAccount)?;
-                    user_no_account.to_account_info()
-                },
-            },
-            authority: ctx.accounts.user.to_account_info(),
-        };
-        let cpi_program = ctx.accounts.token_program.to_account_info();
-        let burn_ctx = CpiContext::new(cpi_program, burn_accounts);
-        burn(burn_ctx, shares_to_sell)?;
-
+    
+        // First, update the market state and burn tokens
         match outcome {
             ShareOutcome::Yes => {
                 market.yes_shares_outstanding = market.yes_shares_outstanding
                     .checked_sub(shares_to_sell)
                     .ok_or(MarketError::MathUnderflow)?;
+    
+                let burn_accounts = Burn {
+                    mint: ctx.accounts.yes_token_mint.to_account_info(),
+                    from: ctx.accounts.user_yes_token_account.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                };
+                let cpi_program = ctx.accounts.token_program.to_account_info();
+                let burn_ctx = CpiContext::new(cpi_program, burn_accounts);
+                burn(burn_ctx, shares_to_sell)?;
             },
             ShareOutcome::No => {
                 market.no_shares_outstanding = market.no_shares_outstanding
                     .checked_sub(shares_to_sell)
                     .ok_or(MarketError::MathUnderflow)?;
+    
+                let burn_accounts = Burn {
+                    mint: ctx.accounts.no_token_mint.to_account_info(),
+                    from: ctx.accounts.user_no_token_account.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                };
+                let cpi_program = ctx.accounts.token_program.to_account_info();
+                let burn_ctx = CpiContext::new(cpi_program, burn_accounts);
+                burn(burn_ctx, shares_to_sell)?;
             },
         }
-
+    
+        // Update total liquidity
         market.total_liquidity = market.total_liquidity
             .checked_sub(payout)
             .ok_or(MarketError::MathUnderflow)?;
-
+    
+        // Transfer payout to user
         let market_key = market.key();
         let authority_seeds = &[
             b"authority",
@@ -185,7 +181,7 @@ pub mod prediction_market {
             &[market.bump]
         ];
         let signer_seeds = &[&authority_seeds[..]];
-
+    
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let transfer_accounts = Transfer {
             from: ctx.accounts.collateral_vault.to_account_info(),
@@ -194,7 +190,7 @@ pub mod prediction_market {
         };
         let transfer_ctx = CpiContext::new_with_signer(cpi_program, transfer_accounts, signer_seeds);
         transfer(transfer_ctx, payout)?;
-
+    
         Ok(())
     }
 
@@ -474,12 +470,12 @@ pub struct SellShares<'info> {
         mut,
         token::mint = market.yes_token_mint
     )]
-    pub user_yes_token_account: Option<Account<'info, TokenAccount>>,
+    pub user_yes_token_account: Account<'info, TokenAccount>,
     #[account(
         mut,
         token::mint = market.no_token_mint
     )]
-    pub user_no_token_account: Option<Account<'info, TokenAccount>>,
+    pub user_no_token_account: Account<'info, TokenAccount>,
     #[account(
         mut, 
         address = market.collateral_vault
